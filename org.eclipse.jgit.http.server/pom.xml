@@ -57,6 +57,7 @@
 
   <artifactId>org.eclipse.jgit.http.server</artifactId>
   <name>JGit - HTTP Server</name>
+  <version>3.5.1.201410131835-r-ialbors</version>
 
   <description>
     Git aware HTTP server implementation.
