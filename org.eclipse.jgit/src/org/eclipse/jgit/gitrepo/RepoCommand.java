@@ -53,8 +53,10 @@ import java.nio.channels.FileChannel;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -87,7 +89,6 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.util.FileUtils;
-
 import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
@@ -104,6 +105,11 @@ import org.xml.sax.helpers.XMLReaderFactory;
  * If called against a bare repository, it will replace all the existing content
  * of the repository with the contents populated from the manifest.
  *
+ * repo manifest allows projects overlapping, e.g. one project's path is
+ * &quot;foo&quot; and another project's path is &quot;foo/bar&quot;. This won't
+ * work in git submodule, so we'll skip all the sub projects
+ * (&quot;foo/bar&quot; in the example) while converting.
+ *
  * @see <a href="https://code.google.com/p/git-repo/">git-repo project page</a>
  * @since 3.4
  */
@@ -116,6 +122,7 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	private PersonIdent author;
 	private RemoteReader callback;
 	private InputStream inputStream;
+	private IncludedFileReader includedReader;
 
 	private List<Project> bareProjects;
 	private Git git;
@@ -156,6 +163,7 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		 * @return the file content.
 		 * @throws GitAPIException
 		 * @throws IOException
+		 * @since 3.5
 		 */
 		public byte[] readFile(String uri, String ref, String path)
 				throws GitAPIException, IOException;
@@ -217,6 +225,25 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		}
 	}
 
+	/**
+	 * A callback to read included xml files.
+	 *
+	 * @since 3.5
+	 */
+	public interface IncludedFileReader {
+		/**
+		 * Read a file from the same base dir of the manifest xml file.
+		 *
+		 * @param path
+		 *            The relative path to the file to read
+		 * @return the {@code InputStream} of the file.
+		 * @throws GitAPIException
+		 * @throws IOException
+		 */
+		public InputStream readIncludeFile(String path)
+				throws GitAPIException, IOException;
+	}
+
 	private static class CopyFile {
 		final Repository repo;
 		final String path;
@@ -249,17 +276,23 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		}
 	}
 
-	private static class Project {
+	private static class Project implements Comparable<Project> {
 		final String name;
 		final String path;
 		final String revision;
+		final String remote;
 		final Set<String> groups;
 		final List<CopyFile> copyfiles;
 
-		Project(String name, String path, String revision, String groups) {
+		Project(String name, String path, String revision,
+				String remote, String groups) {
 			this.name = name;
-			this.path = path;
+			if (path != null)
+				this.path = path;
+			else
+				this.path = name;
 			this.revision = revision;
+			this.remote = remote;
 			this.groups = new HashSet<String>();
 			if (groups != null && groups.length() > 0)
 				this.groups.addAll(Arrays.asList(groups.split(","))); //$NON-NLS-1$
@@ -269,27 +302,63 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		void addCopyFile(CopyFile copyfile) {
 			copyfiles.add(copyfile);
 		}
+
+		String getPathWithSlash() {
+			if (path.endsWith("/")) //$NON-NLS-1$
+				return path;
+			else
+				return path + "/"; //$NON-NLS-1$
+		}
+
+		boolean isAncestorOf(Project that) {
+			return that.getPathWithSlash().startsWith(this.getPathWithSlash());
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (o instanceof Project) {
+				Project that = (Project) o;
+				return this.getPathWithSlash().equals(that.getPathWithSlash());
+			}
+			return false;
+		}
+
+		@Override
+		public int hashCode() {
+			return this.getPathWithSlash().hashCode();
+		}
+
+		public int compareTo(Project that) {
+			return this.getPathWithSlash().compareTo(that.getPathWithSlash());
+		}
 	}
 
 	private static class XmlManifest extends DefaultHandler {
 		private final RepoCommand command;
-		private final InputStream inputStream;
 		private final String filename;
 		private final String baseUrl;
 		private final Map<String, String> remotes;
-		private final List<Project> projects;
 		private final Set<String> plusGroups;
 		private final Set<String> minusGroups;
+		private List<Project> projects;
 		private String defaultRemote;
 		private String defaultRevision;
+		private IncludedFileReader includedReader;
+		private int xmlInRead;
 		private Project currentProject;
 
-		XmlManifest(RepoCommand command, InputStream inputStream,
+		XmlManifest(RepoCommand command, IncludedFileReader includedReader,
 				String filename, String baseUrl, String groups) {
 			this.command = command;
-			this.inputStream = inputStream;
+			this.includedReader = includedReader;
 			this.filename = filename;
-			this.baseUrl = baseUrl;
+
+			// Strip trailing /s to match repo behavior.
+			int lastIndex = baseUrl.length() - 1;
+			while (lastIndex >= 0 && baseUrl.charAt(lastIndex) == '/')
+				lastIndex--;
+			this.baseUrl = baseUrl.substring(0, lastIndex + 1);
+
 			remotes = new HashMap<String, String>();
 			projects = new ArrayList<Project>();
 			plusGroups = new HashSet<String>();
@@ -307,7 +376,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 			}
 		}
 
-		void read() throws IOException {
+		void read(InputStream inputStream) throws IOException {
+			xmlInRead++;
 			final XMLReader xr;
 			try {
 				xr = XMLReaderFactory.createXMLReader();
@@ -336,10 +406,14 @@ public class RepoCommand extends GitCommand<RevCommit> {
 						attributes.getValue("name"), //$NON-NLS-1$
 						attributes.getValue("path"), //$NON-NLS-1$
 						attributes.getValue("revision"), //$NON-NLS-1$
+						attributes.getValue("remote"), //$NON-NLS-1$
 						attributes.getValue("groups")); //$NON-NLS-1$
 			} else if ("remote".equals(qName)) { //$NON-NLS-1$
-				remotes.put(attributes.getValue("name"), //$NON-NLS-1$
-						attributes.getValue("fetch")); //$NON-NLS-1$
+				String alias = attributes.getValue("alias"); //$NON-NLS-1$
+				String fetch = attributes.getValue("fetch"); //$NON-NLS-1$
+				remotes.put(attributes.getValue("name"), fetch); //$NON-NLS-1$
+				if (alias != null)
+					remotes.put(alias, fetch);
 			} else if ("default".equals(qName)) { //$NON-NLS-1$
 				defaultRemote = attributes.getValue("remote"); //$NON-NLS-1$
 				defaultRevision = attributes.getValue("revision"); //$NON-NLS-1$
@@ -353,6 +427,35 @@ public class RepoCommand extends GitCommand<RevCommit> {
 							currentProject.path,
 							attributes.getValue("src"), //$NON-NLS-1$
 							attributes.getValue("dest"))); //$NON-NLS-1$
+			} else if ("include".equals(qName)) { //$NON_NLS-1$
+				String name = attributes.getValue("name");
+				InputStream is = null;
+				if (includedReader != null) {
+					try {
+						is = includedReader.readIncludeFile(name);
+					} catch (Exception e) {
+						throw new SAXException(MessageFormat.format(
+								RepoText.get().errorIncludeFile, name), e);
+					}
+				} else if (filename != null) {
+					int index = filename.lastIndexOf('/');
+					String path = filename.substring(0, index + 1) + name;
+					try {
+						is = new FileInputStream(path);
+					} catch (IOException e) {
+						throw new SAXException(MessageFormat.format(
+								RepoText.get().errorIncludeFile, path), e);
+					}
+				}
+				if (is == null) {
+					throw new SAXException(
+							RepoText.get().errorIncludeNotImplemented);
+				}
+				try {
+					read(is);
+				} catch (IOException e) {
+					throw new SAXException(e);
+				}
 			}
 		}
 
@@ -369,28 +472,72 @@ public class RepoCommand extends GitCommand<RevCommit> {
 
 		@Override
 		public void endDocument() throws SAXException {
-			if (defaultRemote == null) {
-				if (filename != null)
-					throw new SAXException(MessageFormat.format(
-							RepoText.get().errorNoDefaultFilename, filename));
-				else
-					throw new SAXException(RepoText.get().errorNoDefault);
-			}
-			final String remoteUrl;
+			xmlInRead--;
+			if (xmlInRead != 0)
+				return;
+
+			// Only do the following after we finished reading everything.
+			removeNotInGroup();
+			removeOverlaps();
+
+			Map<String, String> remoteUrls = new HashMap<String, String>();
+			URI baseUri;
 			try {
-				URI uri = new URI(baseUrl);
-				remoteUrl = uri.resolve(remotes.get(defaultRemote)).toString();
+				baseUri = new URI(baseUrl);
 			} catch (URISyntaxException e) {
 				throw new SAXException(e);
 			}
 			for (Project proj : projects) {
-				if (inGroups(proj)) {
-					command.addSubmodule(remoteUrl + proj.name,
-							proj.path,
-							proj.revision == null
-									? defaultRevision : proj.revision,
-							proj.copyfiles);
+				String remote = proj.remote;
+				if (remote == null) {
+					if (defaultRemote == null) {
+						if (filename != null)
+							throw new SAXException(MessageFormat.format(
+									RepoText.get().errorNoDefaultFilename,
+									filename));
+						else
+							throw new SAXException(
+									RepoText.get().errorNoDefault);
+					}
+					remote = defaultRemote;
 				}
+				String remoteUrl = remoteUrls.get(remote);
+				if (remoteUrl == null) {
+					remoteUrl = baseUri.resolve(remotes.get(remote)).toString();
+					if (!remoteUrl.endsWith("/"))
+						remoteUrl = remoteUrl + "/";
+					remoteUrls.put(remote, remoteUrl);
+				}
+
+				command.addSubmodule(remoteUrl + proj.name,
+						proj.path,
+						proj.revision == null
+								? defaultRevision : proj.revision,
+						proj.copyfiles);
+			}
+		}
+
+		/** Remove projects that are not in our desired groups. */
+		void removeNotInGroup() {
+			Iterator<Project> iter = projects.iterator();
+			while (iter.hasNext())
+				if (!inGroups(iter.next()))
+					iter.remove();
+		}
+
+		/** Remove projects that sits in a subdirectory of any other project. */
+		void removeOverlaps() {
+			Collections.sort(projects);
+			Iterator<Project> iter = projects.iterator();
+			if (!iter.hasNext())
+				return;
+			Project last = iter.next();
+			while (iter.hasNext()) {
+				Project p = iter.next();
+				if (last.isAncestorOf(p))
+					iter.remove();
+				else
+					last = p;
 			}
 		}
 
@@ -413,12 +560,14 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		}
 	}
 
+	@SuppressWarnings("serial")
 	private static class ManifestErrorException extends GitAPIException {
 		ManifestErrorException(Throwable cause) {
 			super(RepoText.get().invalidManifest, cause);
 		}
 	}
 
+	@SuppressWarnings("serial")
 	private static class RemoteUnavailableException extends GitAPIException {
 		RemoteUnavailableException(String uri) {
 			super(MessageFormat.format(RepoText.get().errorRemoteUnavailable, uri));
@@ -538,6 +687,18 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		return this;
 	}
 
+	/**
+	 * Set the IncludedFileReader callback.
+	 *
+	 * @param reader
+	 * @return this command
+	 * @since 3.5
+	 */
+	public RepoCommand setIncludedFileReader(IncludedFileReader reader) {
+		this.includedReader = reader;
+		return this;
+	}
+
 	@Override
 	public RevCommit call() throws GitAPIException {
 		try {
@@ -567,9 +728,9 @@ public class RepoCommand extends GitCommand<RevCommit> {
 				git = new Git(repo);
 
 			XmlManifest manifest = new XmlManifest(
-					this, inputStream, path, uri, groups);
+					this, includedReader, path, uri, groups);
 			try {
-				manifest.read();
+				manifest.read(inputStream);
 			} catch (IOException e) {
 				throw new ManifestErrorException(e);
 			}
@@ -591,26 +752,26 @@ public class RepoCommand extends GitCommand<RevCommit> {
 				Config cfg = new Config();
 				for (Project proj : bareProjects) {
 					String name = proj.path;
-					String uri = proj.name;
+					String nameUri = proj.name;
 					cfg.setString("submodule", name, "path", name); //$NON-NLS-1$ //$NON-NLS-2$
-					cfg.setString("submodule", name, "url", uri); //$NON-NLS-1$ //$NON-NLS-2$
+					cfg.setString("submodule", name, "url", nameUri); //$NON-NLS-1$ //$NON-NLS-2$
 					// create gitlink
 					DirCacheEntry dcEntry = new DirCacheEntry(name);
 					ObjectId objectId;
 					if (ObjectId.isId(proj.revision))
 						objectId = ObjectId.fromString(proj.revision);
 					else {
-						objectId = callback.sha1(uri, proj.revision);
+						objectId = callback.sha1(nameUri, proj.revision);
 					}
 					if (objectId == null)
-						throw new RemoteUnavailableException(uri);
+						throw new RemoteUnavailableException(nameUri);
 					dcEntry.setObjectId(objectId);
 					dcEntry.setFileMode(FileMode.GITLINK);
 					builder.add(dcEntry);
 
 					for (CopyFile copyfile : proj.copyfiles) {
 						byte[] src = callback.readFile(
-								uri, proj.revision, copyfile.src);
+								nameUri, proj.revision, copyfile.src);
 						objectId = inserter.insert(Constants.OBJ_BLOB, src);
 						dcEntry = new DirCacheEntry(copyfile.dest);
 						dcEntry.setObjectId(objectId);
@@ -683,7 +844,7 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	private void addSubmodule(String url, String name, String revision,
 			List<CopyFile> copyfiles) throws SAXException {
 		if (repo.isBare()) {
-			Project proj = new Project(url, name, revision, null);
+			Project proj = new Project(url, name, revision, null, null);
 			proj.copyfiles.addAll(copyfiles);
 			bareProjects.add(proj);
 		} else {
@@ -716,8 +877,7 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	private static String findRef(String ref, Repository repo)
 			throws IOException {
 		if (!ObjectId.isId(ref)) {
-			Ref r = repo.getRef(
-					Constants.DEFAULT_REMOTE_NAME + "/" + ref);
+			Ref r = repo.getRef(Constants.DEFAULT_REMOTE_NAME + "/" + ref); //$NON-NLS-1$
 			if (r != null)
 				return r.getName();
 		}
