@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2006-2007, Shawn O. Pearce <spearce@spearce.org>
+ * Copyright (C) 2010, Marc Strapetz <marc.strapetz@syntevo.com>
+ * Copyright (C) 2013, Gunnar Wagenknecht
  * and other copyright owners as documented in the project's IP log.
  *
  * This program and the accompanying materials are made available
@@ -40,59 +41,37 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
-package org.eclipse.jgit.lib;
+package org.eclipse.jgit.attributes;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNull;
 
-import java.util.Date;
-import java.util.TimeZone;
-
+import org.eclipse.jgit.attributes.Attribute.State;
 import org.junit.Test;
 
-public class T0001_PersonIdentTest {
+/**
+ * Tests {@link Attribute}
+ */
+public class AttributeTest {
 
 	@Test
-	public void test001_NewIdent() {
-		final PersonIdent p = new PersonIdent("A U Thor", "author@example.com",
-				new Date(1142878501000L), TimeZone.getTimeZone("EST"));
-		assertEquals("A U Thor", p.getName());
-		assertEquals("author@example.com", p.getEmailAddress());
-		assertEquals(1142878501000L, p.getWhen().getTime());
-		assertEquals("A U Thor <author@example.com> 1142878501 -0500",
-				p.toExternalString());
+	public void testBasic() {
+		Attribute a = new Attribute("delta", State.SET);
+		assertEquals(a.getKey(), "delta");
+		assertEquals(a.getState(), State.SET);
+		assertNull(a.getValue());
+		assertEquals(a.toString(), "delta");
+
+		a = new Attribute("delta", State.UNSET);
+		assertEquals(a.getKey(), "delta");
+		assertEquals(a.getState(), State.UNSET);
+		assertNull(a.getValue());
+		assertEquals(a.toString(), "-delta");
+
+		a = new Attribute("delta", "value");
+		assertEquals(a.getKey(), "delta");
+		assertEquals(a.getState(), State.CUSTOM);
+		assertEquals(a.getValue(), "value");
+		assertEquals(a.toString(), "delta=value");
 	}
-
-	@Test
-	public void test002_NewIdent() {
-		final PersonIdent p = new PersonIdent("A U Thor", "author@example.com",
-				new Date(1142878501000L), TimeZone.getTimeZone("GMT+0230"));
-		assertEquals("A U Thor", p.getName());
-		assertEquals("author@example.com", p.getEmailAddress());
-		assertEquals(1142878501000L, p.getWhen().getTime());
-		assertEquals("A U Thor <author@example.com> 1142878501 +0230",
-				p.toExternalString());
-	}
-
-	@Test(expected = IllegalArgumentException.class)
-	public void nullForNameShouldThrowIllegalArgumentException() {
-		new PersonIdent(null, "author@example.com");
-	}
-
-	@Test(expected = IllegalArgumentException.class)
-	public void nullForEmailShouldThrowIllegalArgumentException() {
-		new PersonIdent("A U Thor", null);
-	}
-
-	@Test
-	public void testToExternalStringTrimsNameAndEmail() throws Exception {
-		PersonIdent personIdent = new PersonIdent("  A U Thor  ",
-				"  author@example.com  ");
-
-		String externalString = personIdent.toExternalString();
-
-		assertTrue(externalString.startsWith("A U Thor <author@example.com>"));
-	}
-
 }
