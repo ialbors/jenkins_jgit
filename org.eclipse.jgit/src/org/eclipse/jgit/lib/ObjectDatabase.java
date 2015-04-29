@@ -54,7 +54,7 @@ import org.eclipse.jgit.errors.MissingObjectException;
  * An object database stores one or more Git objects, indexed by their unique
  * {@link ObjectId}.
  */
-public abstract class ObjectDatabase implements AutoCloseable {
+public abstract class ObjectDatabase {
 	/** Initialize a new database instance for access. */
 	protected ObjectDatabase() {
 		// Protected to force extension.
@@ -120,11 +120,8 @@ public abstract class ObjectDatabase implements AutoCloseable {
 	 *             the object store cannot be accessed.
 	 */
 	public boolean has(final AnyObjectId objectId) throws IOException {
-		final ObjectReader or = newReader();
-		try {
+		try (final ObjectReader or = newReader()) {
 			return or.has(objectId);
-		} finally {
-			or.release();
 		}
 	}
 
@@ -172,11 +169,8 @@ public abstract class ObjectDatabase implements AutoCloseable {
 	public ObjectLoader open(AnyObjectId objectId, int typeHint)
 			throws MissingObjectException, IncorrectObjectTypeException,
 			IOException {
-		final ObjectReader or = newReader();
-		try {
+		try (final ObjectReader or = newReader()) {
 			return or.open(objectId, typeHint);
-		} finally {
-			or.release();
 		}
 	}
 

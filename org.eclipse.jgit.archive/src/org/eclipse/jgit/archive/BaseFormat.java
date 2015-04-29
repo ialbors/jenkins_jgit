@@ -1,7 +1,5 @@
 /*
- * Copyright (C) 2008-2009, Google Inc.
- * Copyright (C) 2007, Robin Rosenberg <robin.rosenberg@dewire.com>
- * Copyright (C) 2006-2008, Shawn O. Pearce <spearce@spearce.org>
+ * Copyright (C) 2015, David Ostrovsky <david@ostrovsky.org>
  * and other copyright owners as documented in the project's IP log.
  *
  * This program and the accompanying materials are made available
@@ -43,60 +41,45 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-package org.eclipse.jgit.internal.storage.file;
+package org.eclipse.jgit.archive;
 
+import java.beans.Statement;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.zip.DataFormatException;
-import java.util.zip.Inflater;
+import java.text.MessageFormat;
+import java.util.Map;
 
-import org.eclipse.jgit.internal.storage.pack.PackOutputStream;
+import org.apache.commons.compress.archivers.ArchiveOutputStream;
+import org.eclipse.jgit.archive.internal.ArchiveText;
+import org.eclipse.jgit.util.StringUtils;
 
 /**
- * A window for accessing git packs using a {@link ByteBuffer} for storage.
+ * Base format class
  *
- * @see ByteWindow
+ * @since 4.0
  */
-final class ByteBufferWindow extends ByteWindow {
-	private final ByteBuffer buffer;
+public class BaseFormat {
 
-	ByteBufferWindow(final PackFile pack, final long o, final ByteBuffer b) {
-		super(pack, o, b.capacity());
-		buffer = b;
-	}
-
-	@Override
-	protected int copy(final int p, final byte[] b, final int o, int n) {
-		final ByteBuffer s = buffer.slice();
-		s.position(p);
-		n = Math.min(s.remaining(), n);
-		s.get(b, o, n);
-		return n;
-	}
-
-	@Override
-	void write(PackOutputStream out, long pos, int cnt)
-			throws IOException {
-		final ByteBuffer s = buffer.slice();
-		s.position((int) (pos - start));
-
-		while (0 < cnt) {
-			byte[] buf = out.getCopyBuffer();
-			int n = Math.min(cnt, buf.length);
-			s.get(buf, 0, n);
-			out.write(buf, 0, n);
-			cnt -= n;
+	/**
+	 * Apply options to archive output stream
+	 *
+	 * @param s
+	 *            stream to apply options to
+	 * @param o
+	 *            options map
+	 * @return stream with option applied
+	 * @throws IOException
+	 */
+	protected ArchiveOutputStream applyFormatOptions(ArchiveOutputStream s,
+			Map<String, Object> o) throws IOException {
+		for (Map.Entry<String, Object> p : o.entrySet()) {
+			try {
+				new Statement(s, "set" + StringUtils.capitalize(p.getKey()), //$NON-NLS-1$
+						new Object[] { p.getValue() }).execute();
+			} catch (Exception e) {
+				throw new IOException(MessageFormat.format(
+						ArchiveText.get().cannotSetOption, p.getKey()), e);
+			}
 		}
-	}
-
-	@Override
-	protected int setInput(final int pos, final Inflater inf)
-			throws DataFormatException {
-		final ByteBuffer s = buffer.slice();
-		s.position(pos);
-		final byte[] tmp = new byte[Math.min(s.remaining(), 512)];
-		s.get(tmp, 0, tmp.length);
-		inf.setInput(tmp, 0, tmp.length);
-		return tmp.length;
+		return s;
 	}
 }

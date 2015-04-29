@@ -89,8 +89,7 @@ import org.eclipse.jgit.util.RawParseUtils;
  * delta packed format yielding high compression of lots of object where some
  * objects are similar.
  */
-public class PackFile implements Iterable<PackIndex.MutableEntry>,
-		AutoCloseable {
+public class PackFile implements Iterable<PackIndex.MutableEntry> {
 	/** Sorts PackFiles to be most recently created to least recently created. */
 	public static final Comparator<PackFile> SORT = new Comparator<PackFile>() {
 		public int compare(final PackFile a, final PackFile b) {
@@ -345,11 +344,11 @@ public class PackFile implements Iterable<PackIndex.MutableEntry>,
 		return dstbuf;
 	}
 
-	void copyPackAsIs(PackOutputStream out, boolean validate, WindowCursor curs)
+	void copyPackAsIs(PackOutputStream out, WindowCursor curs)
 			throws IOException {
 		// Pin the first window, this ensures the length is accurate.
 		curs.pin(this, 0);
-		curs.copyPackAsIs(this, length, validate, out);
+		curs.copyPackAsIs(this, length, out);
 	}
 
 	final void copyAsIs(PackOutputStream out, LocalObjectToPack src,
@@ -363,6 +362,7 @@ public class PackFile implements Iterable<PackIndex.MutableEntry>,
 		}
 	}
 
+	@SuppressWarnings("null")
 	private void copyAsIs2(PackOutputStream out, LocalObjectToPack src,
 			boolean validate, WindowCursor curs) throws IOException,
 			StoredObjectRepresentationNotAvailableException {
@@ -502,7 +502,7 @@ public class PackFile implements Iterable<PackIndex.MutableEntry>,
 			// and we have it pinned.  Write this out without copying.
 			//
 			out.writeHeader(src, inflatedLength);
-			quickCopy.write(out, dataOffset, (int) dataLength, null);
+			quickCopy.write(out, dataOffset, (int) dataLength);
 
 		} else if (dataLength <= buf.length) {
 			// Tiny optimization: Lots of objects are very small deltas or
@@ -704,6 +704,7 @@ public class PackFile implements Iterable<PackIndex.MutableEntry>,
 					, getPackFile()));
 	}
 
+	@SuppressWarnings("null")
 	ObjectLoader load(final WindowCursor curs, long pos)
 			throws IOException, LargeObjectException {
 		try {
